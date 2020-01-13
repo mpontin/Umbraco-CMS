@@ -1,7 +1,7 @@
 //used for the media picker dialog
 angular.module("umbraco")
     .controller("Umbraco.Editors.MediaPickerController",
-        function ($scope, mediaResource, entityResource, userService, mediaHelper, mediaTypeHelper, eventsService, treeService, localStorageService, localizationService, editorService) {
+        function ($scope, $timeout, mediaResource, entityResource, userService, mediaHelper, mediaTypeHelper, eventsService, treeService, localStorageService, localizationService) {
 
             var vm = this;
             
@@ -22,12 +22,12 @@ angular.module("umbraco")
 
             vm.clickHandler = clickHandler;
             vm.clickItemName = clickItemName;
-            vm.editMediaItem = editMediaItem;
             vm.gotoFolder = gotoFolder;
 
             var dialogOptions = $scope.model;
             
             $scope.disableFolderSelect = (dialogOptions.disableFolderSelect && dialogOptions.disableFolderSelect !== "0") ? true : false;
+            $scope.disableFocalPoint = (dialogOptions.disableFocalPoint && dialogOptions.disableFocalPoint !== "0") ? true : false;
             $scope.onlyImages = (dialogOptions.onlyImages && dialogOptions.onlyImages !== "0") ? true : false;
             $scope.onlyFolders = (dialogOptions.onlyFolders && dialogOptions.onlyFolders !== "0") ? true : false;
             $scope.showDetails = (dialogOptions.showDetails && dialogOptions.showDetails !== "0") ? true : false;
@@ -36,8 +36,7 @@ angular.module("umbraco")
             $scope.cropSize = dialogOptions.cropSize;
             $scope.lastOpenedNode = localStorageService.get("umbLastOpenedMediaNodeId");
             $scope.lockedFolder = true;
-            $scope.allowMediaEdit = dialogOptions.allowMediaEdit ? dialogOptions.allowMediaEdit : false;
-            
+
             var userStartNodes = [];
 
             var umbracoSettings = Umbraco.Sys.ServerVariables.umbracoSettings;
@@ -131,19 +130,19 @@ angular.module("umbraco")
                     
                     // ID of a UDI or legacy int ID still could be null/undefinied here
                     // As user may dragged in an image that has not been saved to media section yet
-                    if(id){
+                    if (id) {
                         entityResource.getById(id, "Media")
                         .then(function (node) {
                             $scope.target = node;
                             if (ensureWithinStartNode(node)) {
                                 selectMedia(node);
-                                $scope.target.url = mediaHelper.resolveFile(node);
+                                $scope.target.url = mediaHelper.resolveFileFromEntity(node);
+                                $scope.target.thumbnail = mediaHelper.resolveFileFromEntity(node, true);
                                 $scope.target.altText = altText;
                                 openDetailsDialog();
                             }
                         }, gotoStartNode);
-                    }
-                    else {
+                    } else {
                         // No ID set - then this is going to be a tmpimg that has not been uploaded
                         // User editing this will want to be changing the ALT text
                         openDetailsDialog();
@@ -252,11 +251,14 @@ angular.module("umbraco")
                 }
             }
 
-            function clickItemName(item) {
+            function clickItemName(item, event, index) {
                 if (item.isFolder) {
                     gotoFolder(item);
                 }
-            }
+                else {
+                    $scope.clickHandler(item, event, index);
+                }
+            };
 
             function selectMedia(media) {
                 if (!media.selectable) {
@@ -290,13 +292,20 @@ angular.module("umbraco")
 
             function onUploadComplete(files) {
                 gotoFolder($scope.currentFolder).then(function () {
-                    if (files.length === 1 && $scope.model.selection.length === 0) {
-                        var image = $scope.images[$scope.images.length - 1];
-                        $scope.target = image;
-                        $scope.target.url = mediaHelper.resolveFile(image);
-                        selectMedia(image);
-                    }
-                })
+                    $timeout(function () {
+                        if ($scope.multiPicker) {
+                            var images = _.rest($scope.images, $scope.images.length - files.length);
+                            _.each(images, function(image) {
+                                selectMedia(image);
+                            });
+                        } else {
+                            var image = $scope.images[$scope.images.length - 1];
+                            $scope.target = image;
+                            $scope.target.url = mediaHelper.resolveFile(image);
+                            selectMedia(image);
+                        }
+                    });
+                });
             }
 
             function onFilesQueue() {
@@ -333,22 +342,26 @@ angular.module("umbraco")
             }
 
             function openDetailsDialog() {
+                localizationService.localize("defaultdialogs_editSelectedMedia").then(function (data) {
+                    vm.mediaPickerDetailsOverlay = {
+                        show: true,
+                        title: data,
+                        disableFocalPoint: $scope.disableFocalPoint,
+                        submit: function (model) {
+                            $scope.model.selection.push($scope.target);
+                            $scope.model.submit($scope.model);
 
-                vm.mediaPickerDetailsOverlay = {
-                    show: true,
-                    submit: function (model) {
+                            vm.mediaPickerDetailsOverlay.show = false;
+                            vm.mediaPickerDetailsOverlay = null;
+                        },
+                        close: function (oldModel) {
+                            vm.mediaPickerDetailsOverlay.show = false;
+                            vm.mediaPickerDetailsOverlay = null;
 
-                        $scope.model.selection.push($scope.target);
-                        $scope.model.submit($scope.model);
-
-                        vm.mediaPickerDetailsOverlay.show = false;
-                        vm.mediaPickerDetailsOverlay = null;
-                    },
-                    close: function (oldModel) {
-                        vm.mediaPickerDetailsOverlay.show = false;
-                        vm.mediaPickerDetailsOverlay = null;
-                    }
-                };
+                            close();
+                        }
+                    };
+                });
             };
 
             var debounceSearchMedia = _.debounce(function () {
@@ -497,30 +510,6 @@ angular.module("umbraco")
                 }
             }
 
-            function editMediaItem(item) {
-                var mediaEditor = {
-                    id: item.id,
-                    submit: function (model) {
-                        editorService.close()
-                        // update the media picker item in the picker so it matched the saved media item
-                        // the media picker is using media entities so we get the 
-                        // entity so we easily can format it for use in the media grid
-                        if (model && model.mediaNode) {
-                            entityResource.getById(model.mediaNode.id, "media")
-                                .then(function (mediaEntity) {
-                                    angular.extend(item, mediaEntity);
-                                    setMediaMetaData(item);
-                                    setUpdatedMediaNodes(item);
-                                });
-                        }
-                    },
-                    close: function (model) {
-                        setUpdatedMediaNodes(item);
-                        editorService.close();
-                    }
-                };
-                editorService.mediaEditor(mediaEditor);
-            };
 
             /**
              * Called when the umbImageGravity component updates the focal point value

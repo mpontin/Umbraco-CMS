@@ -235,11 +235,24 @@ namespace Umbraco.Web.PublishedCache.NuCache
             var lockInfo = new WriteLockInfo();
             try
             {
-                Lock(lockInfo);
+                try
+                {
+                    // Trying to lock could throw exceptions so always make sure to clean up.
+                    Lock(lockInfo);
+                }
+                finally
+                {
+                    try
+                    {
+                        _localDb?.Dispose();
+                    }
+                    catch { /* TBD: May already be throwing so don't throw again */}
+                    finally
+                    {
+                        _localDb = null;
+                    }
+                }
 
-                if (_localDb == null) return;
-                _localDb.Dispose();
-                _localDb = null;
             }
             finally
             {
@@ -549,7 +562,10 @@ namespace Umbraco.Web.PublishedCache.NuCache
 
                 // manage children
                 if (existing != null)
+                {
                     kit.Node.FirstChildContentId = existing.FirstChildContentId;
+                    kit.Node.LastChildContentId = existing.LastChildContentId;
+                }   
 
                 // set
                 SetValueLocked(_contentNodes, kit.Node.Id, kit.Node);
@@ -571,6 +587,7 @@ namespace Umbraco.Web.PublishedCache.NuCache
                 {
                     // replacing existing, handle siblings
                     kit.Node.NextSiblingContentId = existing.NextSiblingContentId;
+                    kit.Node.PreviousSiblingContentId = existing.PreviousSiblingContentId;
                 }
 
                 _xmap[kit.Node.Uid] = kit.Node.Id;
@@ -597,13 +614,14 @@ namespace Umbraco.Web.PublishedCache.NuCache
         /// <param name="kits">
         /// All kits sorted by Level + Parent Id + Sort order
         /// </param>
+        /// <param name="fromDb">True if the data is coming from the database (not the local cache db)</param>
         /// <returns></returns>
         /// <remarks>
         /// This requires that the collection is sorted by Level + ParentId + Sort Order. 
         /// This should be used only on a site startup as the first generations.
         /// This CANNOT be used after startup since it bypasses all checks for Generations.
         /// </remarks>
-        internal bool SetAllFastSorted(IEnumerable<ContentNodeKit> kits)
+        internal bool SetAllFastSorted(IEnumerable<ContentNodeKit> kits, bool fromDb)
         {
             var lockInfo = new WriteLockInfo();
             var ok = true;
@@ -649,6 +667,9 @@ namespace Umbraco.Web.PublishedCache.NuCache
 
                     _logger.Debug<ContentStore>($"Set {thisNode.Id} with parent {thisNode.ParentContentId}");
                     SetValueLocked(_contentNodes, thisNode.Id, thisNode);
+
+                    // if we are initializing from the database source ensure the local db is updated
+                    if (fromDb && _localDb != null) RegisterChange(thisNode.Id, kit);
 
                     // this node is always the last child
                     parent.LastChildContentId = thisNode.Id;
@@ -729,7 +750,9 @@ namespace Umbraco.Web.PublishedCache.NuCache
                 // clear
                 if (existing != null)
                 {
+                    //this zero's out the branch (recursively), if we're in a new gen this will add a NULL placeholder for the gen
                     ClearBranchLocked(existing);
+                    //TODO: This removes the current GEN from the tree - do we really want to do that?
                     RemoveTreeNodeLocked(existing);
                 }
 
@@ -1002,9 +1025,9 @@ namespace Umbraco.Web.PublishedCache.NuCache
             }
 
             // else it's going somewhere in the middle,
-            // and this is bad, perfs-wise - we only do it when moving
-            // inserting in linked list is slow, optimizing would require trees
-            // but... that should not happen very often - and not on large amount of data
+            // TODO: There was a note about performance when this occurs and that this only happens when moving and not very often, but that is not true,
+            // this also happens anytime a middle node is unpublished or republished (which causes a branch update), i'm unsure if this has perf impacts,
+            // i think this used to but it doesn't seem bad anymore that I can see...
             while (child.NextSiblingContentId > 0)
             {
                 // get next child
